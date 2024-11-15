@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pdfplumber
 import pandas as pd
@@ -9,34 +10,30 @@ import json
 import csv
 from stqdm import stqdm
 
-def save_json(data: list):
+def save_json(data: pd.DataFrame):
     buffer = BytesIO()
-    buffer.write(json.dumps(data, ensure_ascii=False, indent=4).encode('utf-8'))
+    data.to_json(buffer, force_ascii=True)
+    #buffer.write(json.dumps(data, ensure_ascii=False, indent=4).encode('utf-8'))
     buffer.seek(0)
     return buffer
 
 
-def save_csv(data: list):
-    text_buffer = StringIO()
-    fieldnames = data[0].keys()
-    writer = csv.DictWriter(text_buffer, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(data)
-
+def save_csv(data: pd.DataFrame):
     buffer = BytesIO()
-    buffer.write(text_buffer.getvalue().encode("utf-8"))
+    data.to_csv(buffer, index=None, encoding="utf-8")
     buffer.seek(0)
     return buffer
 
 
+@st.cache_data
 def fetch_and_filter_data(start_date: datetime, end_date: datetime, keys: list[str]) -> list:
     """
     Fetches data from the API from start_date to end_date, filters it by 'clavesih',
     and saves each day's filtered data into a JSON file.
 
     Parameters:
-    - start_date (datetime): The starting date as a datetime object.
-    - end_date (datetime): The ending date as a datetime object.
+    - start_date (datetime): The starting date as a datetime object (inclusive).
+    - end_date (datetime): The ending date as a datetime object (inclusive).
     - output_dir (str): Directory where JSON files will be saved.
 
     Returns:
@@ -83,49 +80,58 @@ def fetch_and_filter_data(start_date: datetime, end_date: datetime, keys: list[s
     return historic_data
 
 
-def scraping_tab():
-    date_range = st.date_input("Rango de fechas a extraer",
-                                            value = (datetime.now() - timedelta(days=31), datetime.now()),
-                                            format = "DD/MM/YYYY")
-    
-    col1, col2 = st.columns(2)
-
-    with col1:
-        selected_keys = st.multiselect("Claves", options=['CPEJL','CRNJL','CRTJL','CUQJL',
-                                                                            'EGCJL','LCLJL','LDCJL','REDJL',
-                                                                            'SA1JL','SRSJL','TCTJL','ACHZC',
-                                                                            'ESLJL','ESTJL','HRTJL','POLJL',
-                                                                            'TENJL','TMLJL','TRJCM','VCVJL',
-                                                                            'VEGJL','BBAJL','CHLJL','CHLMC'])
-    with col2:
-        file_format = st.radio("Formato", options=["CSV", "JSON"], horizontal=True)
-
-
-    if st.button("Extraer Datos:"):
-        if len(date_range) != 2:
-            st.error("Selecciona un rango de fechas")
-        elif not selected_keys:
-            st.warning("Selecciona claves para filtrar")
-        elif date_range[1] - date_range[0] > timedelta(days=365):
-            st.error("Selecciona un rango menor o igual a 1 año.")
-        else:
-            # Fetch data
-            data = fetch_and_filter_data(start_date=date_range[0], end_date=date_range[1], keys=selected_keys)
-            
-            # Save data according to the selected file format
-            if file_format == "CSV":
-                file = save_csv(data)
-            else:
-                file = save_json(data)
-                
-            # Provide a download link for the saved file
-            filename = "data.csv" if file_format == "CSV" else "data.json"
-            st.download_button(label="Descargar",
-                               data=file,
-                               file_name=filename)
-
-
 @st.cache_data
+def load_local_data(years) -> pd.DataFrame:
+    '''
+    Loads all local data (if existent) for requested year(s)
+
+    Parameters:
+        - years (int | list[int]): year(s) to retrieve
+    
+    Returns:
+        - data (pd.DataFrame): containing saved data from year(s),
+                               empty pd.DataFrame if data not existent
+    '''
+    if isinstance(years, int):
+        years = [years]
+
+    data = []
+    for y in years:
+        file_path = f"./data/monitoreo/data_{y}.csv"
+        if os.path.exists(file_path):
+            data.append(pd.read_csv(file_path, parse_dates=["fechamonitoreo"], date_format="%Y-%m-%d"))
+    if data:
+        return pd.concat(data)
+    else:
+        return pd.DataFrame()
+
+
+def get_data(date_range: list[datetime, datetime], keys: list[str]):
+    required_years = range(date_range[0].year, date_range[1].year + 1)
+    local_data = load_local_data(required_years)
+
+    if not local_data.empty:
+        local_data = local_data[local_data["clavesih"].isin(keys)]
+        local_data["fechamonitoreo"] = local_data["fechamonitoreo"].dt.date
+        lower, upper = local_data["fechamonitoreo"].min(), local_data["fechamonitoreo"].max()
+    
+        missing_data = []
+
+        if date_range[0] < lower:
+            missing_data = missing_data + fetch_and_filter_data(date_range[0], lower - timedelta(days=1), keys)
+        
+        if date_range[1] > upper:
+            missing_data = missing_data + fetch_and_filter_data(upper + timedelta(days=1), date_range[1], keys)
+        
+        missing_df = pd.DataFrame(missing_data)
+        all_data = pd.concat([local_data, missing_df])
+
+    else:
+        all_data = pd.DataFrame(fetch_and_filter_data(date_range[0], date_range[1], keys))
+
+    return all_data
+
+
 def save_xlsx(dfs: list[pd.DataFrame]):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer) as writer:
@@ -233,13 +239,45 @@ def converter_tab():
                     st.write(t)
 
 
-st.set_page_config(page_title="PDF Converter", layout="wide")
+st.set_page_config(page_title="Monitoreo de Presas - Jalisco")
 
 tab1, tab2, tab3 = st.tabs(["Scraping", "Convertidor PDF", "-"])
 
 with tab1:
     st.title("Data Scraping")
-    scraping_tab()
+    date_range = st.date_input("Rango de fechas a extraer",
+                                            value = (datetime.now() - timedelta(days=31), datetime.now()),
+                                            format = "DD/MM/YYYY")
+    
+    col1, col2 = st.columns(2)
+
+    with col1:
+        selected_keys = st.multiselect("Claves", options=["ESLJL", "EGCJL", "REDJL"])
+    with col2:
+        file_format = st.radio("Formato", options=["CSV", "JSON"], horizontal=True)
+
+
+    if st.button("Extraer Datos:"):
+        if len(date_range) != 2:
+            st.error("Selecciona un rango de fechas")
+        elif not selected_keys:
+            st.warning("Selecciona claves para filtrar")
+        else:
+            # Fetch data
+            data = get_data(date_range, selected_keys)
+
+            # Save data according to the selected file format
+            if file_format == "CSV":
+                file = save_csv(data)
+            else:
+                file = save_json(data)
+                
+            # Provide a download link for the saved file
+            filename = "data.csv" if file_format == "CSV" else "data.json"
+            st.download_button(label="Descargar",
+                               data=file,
+                               file_name=filename)
+
 
 with tab2:
     st.title("PDF Converter")
