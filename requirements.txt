@@ -1,4 +1,4 @@
-xpandas==2.2.3
+pandas==2.2.3
 pdfplumber==0.11.4
 plotly==5.24.1
 Requests==2.32.3
